@@ -69,6 +69,14 @@ class JSONLinesEncoding(BaseBatchFileEncoding):
     __encoding_format__ = "jsonl"
 
 
+
+@dataclass
+class ParquetEncoding(BaseBatchFileEncoding):
+    """Parquet encoding for batch.files."""
+
+    __encoding_format__ = "parquet"
+
+
 @dataclass
 class SDKBatchMessage(Message):
     """Singer batch message in the Meltano Singer SDK flavor."""
