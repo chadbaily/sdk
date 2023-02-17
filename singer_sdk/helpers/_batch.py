@@ -23,6 +23,8 @@ class BatchFileFormat(str, enum.Enum):
     JSONL = "jsonl"
     """JSON Lines format."""
 
+    PARQUET = "parquet"
+    """Parquet format."""
 
 @dataclass
 class BaseBatchFileEncoding:
