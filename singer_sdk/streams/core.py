@@ -16,6 +16,8 @@ from typing import Any, Generator, Iterable, Iterator, Mapping, TypeVar, cast
 from uuid import uuid4
 
 import pendulum
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 import singer_sdk._singerlib as singer
 from singer_sdk import metrics
@@ -23,6 +25,7 @@ from singer_sdk.exceptions import InvalidStreamSortException, MaxRecordsLimitExc
 from singer_sdk.helpers._batch import (
     BaseBatchFileEncoding,
     BatchConfig,
+    BatchFileFormat,
     SDKBatchMessage,
 )
 from singer_sdk.helpers._catalog import pop_deselected_record_properties
@@ -43,6 +46,7 @@ from singer_sdk.helpers._typing import (
     TypeConformanceLevel,
     conform_record_data_types,
     is_datetime_type,
+    json_schema_to_arrow,
 )
 from singer_sdk.helpers._util import utc_now
 from singer_sdk.mapper import RemoveRecordTransform, SameRecordTransform, StreamMap
@@ -1248,7 +1252,17 @@ class Stream(metaclass=abc.ABCMeta):
 
         Yields:
             A tuple of (encoding, manifest) for each batch.
+
+        Raises:
+            NotImplementedError: If the batch encoding format is unsupported.
         """
+        if batch_config.encoding.format not in [
+            BatchFileFormat.PARQUET,
+            BatchFileFormat.JSONL,
+        ]:
+            raise NotImplementedError(
+                f"Unsupported batch encoding format: {batch_config.encoding.format}"
+            )
         sync_id = f"{self.tap_name}--{self.name}-{uuid4()}"
         prefix = batch_config.storage.prefix or ""
 
@@ -1259,17 +1273,46 @@ class Stream(metaclass=abc.ABCMeta):
             ),
             start=1,
         ):
-            filename = f"{prefix}{sync_id}-{i}.json.gz"
-            with batch_config.storage.fs() as fs:
-                with fs.open(filename, "wb") as f:
-                    # TODO: Determine compression from config.
-                    with gzip.GzipFile(fileobj=f, mode="wb") as gz:
-                        gz.writelines(
+            file_formats = [member.value for member in BatchFileFormat]
+            if batch_config.encoding.format in file_formats:
+                filename = f"{prefix}{sync_id}-{i}.{batch_config.encoding.format}"
+                if batch_config.encoding.compression == "gzip":
+                    filename = f"{filename}.gz"
+            else:
+                filename = f"{prefix}{sync_id}-{i}.json"
+                if batch_config.encoding.compression == "gzip":
+                    filename = f"{filename}.gz"
+            file_url = self._write_batch_file(chunk, filename, batch_config)
+            yield batch_config.encoding, [file_url]
+
+    def _write_batch_file(
+        self,
+        chunk: Iterator[dict],
+        filename: str,
+        batch_config: BatchConfig,
+    ) -> str:
+        with batch_config.storage.fs() as fs:
+            with fs.open(filename, "wb") as f:
+                if batch_config.encoding.format == BatchFileFormat.PARQUET:
+                    pylist = list(chunk)
+                    schema = json_schema_to_arrow(self.schema)
+                    table = pa.Table.from_pylist(pylist, schema=schema)
+                    if batch_config.encoding.compression == "gzip":
+                        pq.write_table(table, f, compression="GZIP")
+                    else:
+                        pq.write_table(table, f)
+                else:
+                    if batch_config.encoding.compression == "gzip":
+                        with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+                            gz.writelines(
+                                (json.dumps(record) + "\n").encode() for record in chunk
+                            )
+                    else:
+                        f.writelines(
                             (json.dumps(record) + "\n").encode() for record in chunk
                         )
                 file_url = fs.geturl(filename)
-
-            yield batch_config.encoding, [file_url]
+        return file_url
 
     def post_process(self, row: dict, context: dict | None = None) -> dict | None:
         """As needed, append or transform raw data to match expected structure.
